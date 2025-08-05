@@ -94,7 +94,7 @@ class Product(Base):
     @property
     def current_stock(self):
         """Текущий остаток товара"""
-        sold = sum(sale.quantity for sale in self.sales)
+        sold = sum(sale.quantity for sale in self.sales if not sale.is_returned)
         return self.quantity - sold
 
     @property
