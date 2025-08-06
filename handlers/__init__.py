@@ -4,7 +4,7 @@ handlers/__init__.py
 """
 from aiogram import Dispatcher
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery
 from config import ADMIN_IDS
 
 # Импорт модулей с хендлерами будет после определения классов

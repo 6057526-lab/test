@@ -359,16 +359,16 @@ async def navigate_pages(callback: CallbackQuery, state: FSMContext):
 
 # === СТАРЫЙ ПОИСК ПО ТЕКСТУ ===
 @router.message(SaleStates.waiting_for_product)
-async def search_product_for_sale(callback: CallbackQuery, state: FSMContext):
+async def search_product_for_sale(message: Message, state: FSMContext):
     """Поиск товара для продажи (старый способ)"""
-    query = callback.text
+    query = message.text
 
     with get_db_session() as db:
         products_data = CoreService.search_products(db, query)
 
     if not products_data:
         keyboard = get_cancel_back_keyboard()
-        await callback.reply(
+        await message.reply(
             "❌ Товары не найдены. Попробуйте другой запрос.",
             reply_markup=keyboard
         )
@@ -386,7 +386,7 @@ async def search_product_for_sale(callback: CallbackQuery, state: FSMContext):
 
     if not has_products:
         keyboard = get_cancel_back_keyboard()
-        await callback.reply(
+        await message.reply(
             "❌ Нет товаров в наличии по вашему запросу",
             reply_markup=keyboard
         )
@@ -399,7 +399,7 @@ async def search_product_for_sale(callback: CallbackQuery, state: FSMContext):
         get_back_button()
     )
 
-    await callback.reply(
+    await message.reply(
         "📋 Выберите товар для продажи:",
         reply_markup=keyboard.as_markup()
     )

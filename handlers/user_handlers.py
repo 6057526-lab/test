@@ -77,27 +77,27 @@ async def bonus_view(message: Message):
         with get_db_session() as db:
             agents = db.query(Agent).filter(Agent.is_active == True).all()
 
-        keyboard = InlineKeyboardBuilder()
-        for agent in agents:
-            # Подсчитываем невыплаченные бонусы
-            unpaid_bonuses = db.query(Bonus).filter(
-                Bonus.agent_id == agent.id,
-                Bonus.is_paid == False
-            ).all()
-            unpaid_amount = sum(b.amount for b in unpaid_bonuses)
+            keyboard = InlineKeyboardBuilder()
+            for agent in agents:
+                # Подсчитываем невыплаченные бонусы
+                unpaid_bonuses = db.query(Bonus).filter(
+                    Bonus.agent_id == agent.id,
+                    Bonus.is_paid == False
+                ).all()
+                unpaid_amount = sum(b.amount for b in unpaid_bonuses)
 
-            display_text = f"👤 {agent.full_name}"
-            if unpaid_amount > 0:
-                display_text += f" ({CURRENCY_FORMAT.format(unpaid_amount)})"
+                display_text = f"👤 {agent.full_name}"
+                if unpaid_amount > 0:
+                    display_text += f" ({CURRENCY_FORMAT.format(unpaid_amount)})"
 
-            keyboard.button(
-                text=display_text,
-                callback_data=f"bonus_agent_{agent.id}"
-            )
+                keyboard.button(
+                    text=display_text,
+                    callback_data=f"bonus_agent_{agent.id}"
+                )
 
-        keyboard.button(text="🔄 Обновить", callback_data="refresh_bonus_list")
-        keyboard.row(get_back_button())
-        keyboard.adjust(2)
+            keyboard.button(text="🔄 Обновить", callback_data="refresh_bonus_list")
+            keyboard.row(get_back_button())
+            keyboard.adjust(2)
 
         await message.reply(
             "🎁 <b>Управление бонусами</b>\n\n"
@@ -131,10 +131,10 @@ async def bonus_view(message: Message):
             else:
                 text += "У вас пока нет бонусов."
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_my_bonus")],
-            [get_back_button()]
-        ])
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_my_bonus")],
+                [get_back_button()]
+            ])
 
         await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
 
