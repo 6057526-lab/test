@@ -807,3 +807,285 @@ class CoreService:
         ).order_by(Sale.sale_date.desc()).all()
 
         return sales
+
+    # === МЕТОДЫ ФИЛЬТРАЦИИ ===
+    @staticmethod
+    def get_available_filter_values(db: Session) -> Dict:
+        """Получить доступные значения для фильтров (только товары с остатками)"""
+        from sqlalchemy import func, select
+
+        # Подзапрос для товаров с остатками
+        sold_subquery = (
+            select(
+                Sale.product_id,
+                func.sum(Sale.quantity).label('sold_quantity')
+            )
+            .filter(Sale.is_returned == False)
+            .group_by(Sale.product_id)
+            .subquery()
+        )
+
+        # Основной запрос - товары с остатками > 0
+        products_in_stock = (
+            db.query(Product, Batch.warehouse)
+            .join(Batch)
+            .outerjoin(sold_subquery, Product.id == sold_subquery.c.product_id)
+            .filter(
+                Product.quantity - func.coalesce(sold_subquery.c.sold_quantity, 0) > 0
+            )
+            .all()
+        )
+
+        categories = set()
+        sizes = set()
+        ages = set()
+        warehouses = set()
+        colors = set()
+
+        for product, warehouse in products_in_stock:
+            # Извлекаем категории из названий
+            name_lower = product.name.lower()
+            if 'конь' in name_lower or 'boot' in name_lower:
+                categories.add('Коньки')
+            elif 'клюш' in name_lower or 'stick' in name_lower:
+                categories.add('Клюшки')
+            elif 'шлем' in name_lower or 'helmet' in name_lower:
+                categories.add('Шлемы')
+            elif 'перчатк' in name_lower or 'glove' in name_lower:
+                categories.add('Перчатки')
+            elif 'защита' in name_lower or 'pad' in name_lower:
+                categories.add('Защита')
+            else:
+                categories.add('Прочее')
+
+            if product.size:
+                sizes.add(product.size)
+            if product.age:
+                ages.add(product.age)
+            if warehouse:
+                warehouses.add(warehouse)
+            if product.color:
+                colors.add(product.color)
+
+        return {
+            'categories': sorted(categories),
+            'sizes': sorted(sizes),
+            'ages': sorted(ages),
+            'warehouses': sorted(warehouses),
+            'colors': sorted(colors)
+        }
+
+    @staticmethod
+    def get_product_categories_in_stock(db: Session) -> Dict[str, int]:
+        """Получить категории товаров с количеством в наличии"""
+        # Получаем товары с остатками
+        stock_data = CoreService.get_stock(db)
+
+        categories = {}
+        for item in stock_data:
+            name = item['name'].lower()
+
+            # Определяем категорию
+            if 'конь' in name or 'boot' in name:
+                category = 'Коньки'
+            elif 'клюш' in name or 'stick' in name:
+                category = 'Клюшки'
+            elif 'шлем' in name or 'helmet' in name:
+                category = 'Шлемы'
+            elif 'перчатк' in name or 'glove' in name:
+                category = 'Перчатки'
+            elif 'защита' in name or 'pad' in name:
+                category = 'Защита'
+            else:
+                category = 'Прочее'
+
+            categories[category] = categories.get(category, 0) + 1
+
+        return dict(sorted(categories.items()))
+
+    @staticmethod
+    def get_available_sizes_in_stock(db: Session) -> Dict[str, int]:
+        """Получить размеры с количеством товаров"""
+        stock_data = CoreService.get_stock(db)
+
+        sizes = {}
+        for item in stock_data:
+            size = item['size']
+            if size:
+                sizes[size] = sizes.get(size, 0) + 1
+
+        return dict(sorted(sizes.items()))
+
+    @staticmethod
+    def get_available_ages_in_stock(db: Session) -> Dict[str, int]:
+        """Получить возрастные группы с количеством товаров"""
+        stock_data = CoreService.get_stock(db)
+
+        ages = {}
+        for item in stock_data:
+            # Получаем возраст из базы через product
+            product = db.query(Product).get(item['id'])
+            if product and product.age:
+                age = product.age
+                ages[age] = ages.get(age, 0) + 1
+
+        return dict(sorted(ages.items()))
+
+    @staticmethod
+    def get_warehouses_with_stock(db: Session) -> Dict[str, int]:
+        """Получить склады с количеством товаров"""
+        stock_data = CoreService.get_stock(db)
+
+        warehouses = {}
+        for item in stock_data:
+            warehouse = item['warehouse']
+            if warehouse:
+                warehouses[warehouse] = warehouses.get(warehouse, 0) + 1
+
+        return dict(sorted(warehouses.items()))
+
+    @staticmethod
+    def get_products_by_category(db: Session, category: str) -> List[Dict]:
+        """Получить товары по категории"""
+        all_products = CoreService.search_products(db, "")  # Получаем все товары
+
+        filtered = []
+        for item in all_products:
+            if item['current_stock'] <= 0:
+                continue
+
+            name = item['product'].name.lower()
+            product_category = 'Прочее'
+
+            if 'конь' in name or 'boot' in name:
+                product_category = 'Коньки'
+            elif 'клюш' in name or 'stick' in name:
+                product_category = 'Клюшки'
+            elif 'шлем' in name or 'helmet' in name:
+                product_category = 'Шлемы'
+            elif 'перчатк' in name or 'glove' in name:
+                product_category = 'Перчатки'
+            elif 'защита' in name or 'pad' in name:
+                product_category = 'Защита'
+
+            if product_category == category:
+                filtered.append(item)
+
+        return filtered[:50]  # Ограничиваем до 50 товаров
+
+    @staticmethod
+    def get_products_by_size(db: Session, size: str) -> List[Dict]:
+        """Получить товары по размеру"""
+        from sqlalchemy import func, select
+
+        # Подзапрос для остатков
+        sold_subquery = (
+            select(
+                Sale.product_id,
+                func.sum(Sale.quantity).label('sold_quantity')
+            )
+            .filter(Sale.is_returned == False)
+            .group_by(Sale.product_id)
+            .subquery()
+        )
+
+        products = (
+            db.query(
+                Product,
+                func.coalesce(sold_subquery.c.sold_quantity, 0).label('sold'),
+                (Product.quantity - func.coalesce(sold_subquery.c.sold_quantity, 0)).label('current_stock')
+            )
+            .outerjoin(sold_subquery, Product.id == sold_subquery.c.product_id)
+            .filter(
+                Product.size == size,
+                Product.quantity - func.coalesce(sold_subquery.c.sold_quantity, 0) > 0
+            )
+            .limit(50)
+            .all()
+        )
+
+        result = []
+        for product, sold, current_stock in products:
+            result.append({
+                'product': product,
+                'sold': sold,
+                'current_stock': current_stock
+            })
+
+        return result
+
+    @staticmethod
+    def get_products_by_age(db: Session, age: str) -> List[Dict]:
+        """Получить товары по возрасту"""
+        from sqlalchemy import func, select
+
+        sold_subquery = (
+            select(
+                Sale.product_id,
+                func.sum(Sale.quantity).label('sold_quantity')
+            )
+            .filter(Sale.is_returned == False)
+            .group_by(Sale.product_id)
+            .subquery()
+        )
+
+        products = (
+            db.query(
+                Product,
+                func.coalesce(sold_subquery.c.sold_quantity, 0).label('sold'),
+                (Product.quantity - func.coalesce(sold_subquery.c.sold_quantity, 0)).label('current_stock')
+            )
+            .outerjoin(sold_subquery, Product.id == sold_subquery.c.product_id)
+            .filter(
+                Product.age == age,
+                Product.quantity - func.coalesce(sold_subquery.c.sold_quantity, 0) > 0
+            )
+            .limit(50)
+            .all()
+        )
+
+        result = []
+        for product, sold, current_stock in products:
+            result.append({
+                'product': product,
+                'sold': sold,
+                'current_stock': current_stock
+            })
+
+        return result
+
+    @staticmethod
+    def get_products_by_warehouse(db: Session, warehouse: str) -> List[Dict]:
+        """Получить товары по складу"""
+        stock_data = CoreService.get_stock(db, warehouse=warehouse)
+
+        # Преобразуем в формат для показа
+        result = []
+        for item in stock_data[:50]:  # Ограничиваем до 50
+            product = db.query(Product).get(item['id'])
+            if product:
+                result.append({
+                    'product': product,
+                    'current_stock': item['stock'],
+                    'sold': 0  # Для совместимости
+                })
+
+        return result
+
+    @staticmethod
+    def get_all_products_in_stock(db: Session) -> List[Dict]:
+        """Получить все товары в наличии"""
+        stock_data = CoreService.get_stock(db)
+
+        # Преобразуем в формат для показа
+        result = []
+        for item in stock_data[:100]:  # Ограничиваем до 100 товаров
+            product = db.query(Product).get(item['id'])
+            if product:
+                result.append({
+                    'product': product,
+                    'current_stock': item['stock'],
+                    'sold': 0  # Для совместимости
+                })
+
+        return result

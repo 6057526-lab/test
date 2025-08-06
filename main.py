@@ -9,7 +9,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import TOKEN
 from data.db import init_db
-from handlers.handlers import register_handlers
+from handlers import register_all_handlers
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,7 +32,7 @@ async def main():
 
     # Регистрация хендлеров
     logger.info("Регистрация хендлеров...")
-    register_handlers(dp)
+    register_all_handlers(dp)  # ← Исправлено: было register_handlers(dp)
 
     # Запуск бота
     try:
