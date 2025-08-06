@@ -2,7 +2,7 @@
 Вспомогательные функции и утилиты
 """
 from typing import Dict, List, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 from io import BytesIO
 
@@ -75,8 +75,8 @@ def create_sales_report(report: Dict, period_name: str) -> str:
 
 
 def calculate_cost_price(price_eur: float, exchange_rate: float,
-                         coefficient: float, weight: float,
-                         logistics_per_kg: float) -> float:
+                        coefficient: float, weight: float,
+                        logistics_per_kg: float) -> float:
     """Расчет себестоимости товара"""
     return price_eur * exchange_rate * coefficient + weight * logistics_per_kg
 
@@ -113,8 +113,7 @@ def validate_excel_data(df: pd.DataFrame, required_columns: List[str]) -> List[s
         valid_fits = ['regular', 'tapered', 'wide']
         invalid_fits = df[~df['Фит'].str.lower().isin(valid_fits)]
         if not invalid_fits.empty:
-            errors.append(
-                f"Некорректный фит (должен быть {', '.join(valid_fits)}): строки {invalid_fits.index.tolist()}")
+            errors.append(f"Некорректный фит (должен быть {', '.join(valid_fits)}): строки {invalid_fits.index.tolist()}")
 
     return errors
 

@@ -161,11 +161,18 @@ async def process_batch_file(message: Message, state: FSMContext):
     # Сохраняем путь к файлу
     await state.update_data(file_path=file_path)
 
-    # Запрашиваем склад
-    warehouses = ["Олег", "Максим", "Общий"]
+    # Получаем список складов из БД или конфига
+    with get_db_session() as db:
+        existing_warehouses = CoreService.get_warehouse_list(db)
+
+    # Добавляем предустановленные склады из конфига
+    from config import DEFAULT_WAREHOUSES
+    all_warehouses = list(set(existing_warehouses + DEFAULT_WAREHOUSES))
+
     keyboard = InlineKeyboardBuilder()
-    for warehouse in warehouses:
+    for warehouse in all_warehouses:
         keyboard.button(text=warehouse, callback_data=f"warehouse_{warehouse}")
+    keyboard.button(text="➕ Новый склад", callback_data="warehouse_new")
     keyboard.adjust(2)
 
     await message.reply(

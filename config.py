@@ -79,6 +79,9 @@ EXCEL_TEMPLATE_COLUMNS = [
     'Курс', 'Коэффициент', 'Логистика (на кг)', 'Склад'
 ]
 
+# Склады по умолчанию
+DEFAULT_WAREHOUSES = ['Олег', 'Максим', 'Общий']
+
 # Настройки бонусной программы по умолчанию
 DEFAULT_BONUS_RULES = [
     {'min_amount': 0, 'max_amount': 50000, 'percent': 5},

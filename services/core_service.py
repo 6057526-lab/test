@@ -234,7 +234,7 @@ class CoreService:
     def set_retail_price(db: Session, product_id: int,
                         retail_price: float, changed_by_id: int) -> Product:
         """Установить розничную цену"""
-        product = db.query(Product).get(product_id)
+        product = db.get(Product, product_id)
         if not product:
             raise ValueError("Товар не найден")
 
@@ -264,7 +264,12 @@ class CoreService:
     def create_sale(db: Session, product_id: int, agent_id: int,
                    sale_price: float, quantity: int = 1) -> Sale:
         """Создать продажу"""
-        product = db.query(Product).get(product_id)
+        from sqlalchemy.orm import joinedload
+
+        product = db.query(Product).options(
+            joinedload(Product.batch)
+        ).filter(Product.id == product_id).first()
+
         if not product:
             raise ValueError("Товар не найден")
 
@@ -486,7 +491,12 @@ class CoreService:
         # Группировка по агентам
         agent_stats = {}
         for sale in sales:
-            agent_name = sale.agent.full_name
+            # Проверяем, что у продажи есть агент
+            if sale.agent:
+                agent_name = sale.agent.full_name
+            else:
+                agent_name = "Неизвестный агент"
+
             if agent_name not in agent_stats:
                 agent_stats[agent_name] = {
                     'sales_count': 0,
@@ -512,7 +522,7 @@ class CoreService:
     @staticmethod
     def return_sale(db: Session, sale_id: int, reason: str, admin_id: int) -> Sale:
         """Оформить возврат продажи"""
-        sale = db.query(Sale).get(sale_id)
+        sale = db.get(Sale, sale_id)
         if not sale:
             raise ValueError("Продажа не найдена")
 
@@ -606,7 +616,12 @@ class CoreService:
     @staticmethod
     def get_product_info(db: Session, product_id: int) -> Dict:
         """Получить полную информацию о товаре"""
-        product = db.query(Product).get(product_id)
+        from sqlalchemy.orm import joinedload
+
+        product = db.query(Product).options(
+            joinedload(Product.batch)
+        ).filter(Product.id == product_id).first()
+
         if not product:
             raise ValueError("Товар не найден")
 
@@ -763,8 +778,24 @@ class CoreService:
         return [w[0] for w in warehouses]
 
     @staticmethod
+    async def create_batch_from_excel_async(db: Session, file_path: str,
+                                            warehouse: str, created_by_id: int) -> Tuple[Batch, List[Product]]:
+        """Создать партию из Excel файла (асинхронная версия)"""
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Выполняем блокирующую операцию в отдельном потоке
+        with ThreadPoolExecutor() as executor:
+            result = await asyncio.get_event_loop().run_in_executor(
+                executor,
+                CoreService.create_batch_from_excel,
+                db, file_path, warehouse, created_by_id
+            )
+        return result
+
+    @staticmethod
     def get_agent_sales_history(db: Session, agent_id: int,
-                               days: int = 30) -> List[Sale]:
+                                days: int = 30) -> List[Sale]:
         """История продаж агента"""
         start_date = datetime.utcnow() - timedelta(days=days)
 
