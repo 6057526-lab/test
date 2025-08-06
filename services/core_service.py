@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 import pandas as pd
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_
+from sqlalchemy import func, and_, or_, select
 
 from data.db import get_db_session
 from data.models import (
@@ -82,6 +82,7 @@ class CoreService:
 
             products = []
             errors = []
+            ean_count = {}  # Для отслеживания дубликатов EAN в файле
 
             for idx, row in df.iterrows():
                 try:
@@ -92,6 +93,14 @@ class CoreService:
 
                     # Преобразуем типы данных
                     ean = str(row['EAN']).strip()
+
+                    # Проверка на дубликаты в текущем файле
+                    if ean in ean_count:
+                        ean_count[ean] += 1
+                        errors.append(f"Строка {idx+2}: дубликат EAN {ean} (уже встречался в строке {ean_count[ean]})")
+                        continue
+                    else:
+                        ean_count[ean] = idx + 2
                     name = str(row['Наименование']).strip() if not pd.isna(row['Наименование']) else 'Без названия'
                     model = str(row['Модель']).strip() if not pd.isna(row['Модель']) else ''
                     color = str(row['Цвет']).strip() if not pd.isna(row['Цвет']) else ''
@@ -99,13 +108,32 @@ class CoreService:
                     age = str(row['Возраст']).strip() if not pd.isna(row['Возраст']) else ''
                     fit = str(row['Фит']).lower().strip() if not pd.isna(row['Фит']) else 'regular'
 
-                    # Числовые поля
-                    weight = float(row['Вес']) if not pd.isna(row['Вес']) else 0.0
+                    # Числовые поля с валидацией
+                    weight = float(row['Вес']) if not pd.isna(row['Вес']) else 0.1
+                    if weight <= 0:
+                        weight = 0.1  # Минимальный вес
+
                     quantity = int(row['Кол-во']) if not pd.isna(row['Кол-во']) else 0
+                    if quantity < 0:
+                        errors.append(f"Строка {idx+2}: отрицательное количество")
+                        continue
+
                     price_eur = float(row['Цена в евро']) if not pd.isna(row['Цена в евро']) else 0.0
+                    if price_eur < 0:
+                        errors.append(f"Строка {idx+2}: отрицательная цена")
+                        continue
+
                     exchange_rate = float(row['Курс']) if not pd.isna(row['Курс']) else 1.0
+                    if exchange_rate <= 0:
+                        exchange_rate = 1.0
+
                     coefficient = float(row['Коэффициент']) if not pd.isna(row['Коэффициент']) else 1.0
+                    if coefficient <= 0:
+                        coefficient = 1.0
+
                     logistics_per_kg = float(row['Логистика (на кг)']) if not pd.isna(row['Логистика (на кг)']) else 0.0
+                    if logistics_per_kg < 0:
+                        logistics_per_kg = 0.0
 
                     # Проверка валидности фита
                     if fit not in ['regular', 'tapered', 'wide']:
@@ -116,6 +144,29 @@ class CoreService:
                         price_eur * exchange_rate * coefficient +
                         weight * logistics_per_kg
                     )
+
+                    # Проверка на существующий товар с таким EAN в этой партии
+                    existing_product = db.query(Product).filter_by(
+                        ean=ean,
+                        batch_id=batch.id
+                    ).first()
+
+                    if existing_product:
+                        # Если товар уже есть в партии, обновляем количество
+                        existing_product.quantity += quantity
+
+                        # Обновляем запись в stock_log
+                        stock_log = StockLog(
+                            product_id=existing_product.id,
+                            operation_type='in',
+                            quantity=quantity,
+                            warehouse=warehouse,
+                            reference_id=batch.id
+                        )
+                        db.add(stock_log)
+
+                        errors.append(f"Строка {idx+2}: товар с EAN {ean} уже есть в партии, количество добавлено")
+                        continue
 
                     product = Product(
                         ean=ean,
@@ -229,8 +280,9 @@ class CoreService:
             raise ValueError(f"Недостаточно товара. Доступно: {current_stock}")
 
         # Рассчитываем маржу
-        margin = sale_price - product.cost_price
-        margin_percent = (margin / sale_price * 100) if sale_price > 0 else 0
+        margin_per_unit = sale_price - product.cost_price
+        total_margin = margin_per_unit * quantity
+        margin_percent = (margin_per_unit / sale_price * 100) if sale_price > 0 else 0
 
         # Создаем продажу
         sale = Sale(
@@ -238,7 +290,7 @@ class CoreService:
             agent_id=agent_id,
             quantity=quantity,
             sale_price=sale_price,
-            margin=margin,
+            margin=total_margin,  # Общая маржа за все единицы
             margin_percent=margin_percent,
             warehouse=product.batch.warehouse
         )
@@ -255,8 +307,8 @@ class CoreService:
         )
         db.add(stock_log)
 
-        # Рассчитываем бонус
-        bonus_amount, bonus_rule = CoreService.calculate_bonus(db, agent_id, margin)
+        # Рассчитываем бонус (используем общую маржу)
+        bonus_amount, bonus_rule = CoreService.calculate_bonus(db, agent_id, total_margin)
         if bonus_amount > 0 and bonus_rule:
             bonus = Bonus(
                 agent_id=agent_id,
@@ -330,7 +382,8 @@ class CoreService:
             db.query(
                 Product,
                 func.coalesce(sold_subquery.c.sold_quantity, 0).label('sold'),
-                (Product.quantity - func.coalesce(sold_subquery.c.sold_quantity, 0)).label('current_stock')
+                (Product.quantity - func.coalesce(sold_subquery.c.sold_quantity, 0)).label('current_stock'),
+                Batch.warehouse
             )
             .join(Batch)
             .outerjoin(sold_subquery, Product.id == sold_subquery.c.product_id)
@@ -345,26 +398,23 @@ class CoreService:
         if size:
             query = query.filter(Product.size == size)
 
-        # Фильтруем только товары с остатком > 0
-        query = query.having(
-            (Product.quantity - func.coalesce(sold_subquery.c.sold_quantity, 0)) > 0
-        )
-
+        # Получаем все товары и фильтруем в Python
         items = query.all()
 
         result = []
-        for product, sold, current_stock in items:
-            result.append({
-                'id': product.id,
-                'ean': product.ean,
-                'name': product.name,
-                'size': product.size,
-                'color': product.color,
-                'stock': current_stock,
-                'cost_price': product.cost_price,
-                'retail_price': product.retail_price,
-                'warehouse': product.batch.warehouse
-            })
+        for product, sold, current_stock, warehouse in items:
+            if current_stock > 0:  # Фильтруем только товары с остатком
+                result.append({
+                    'id': product.id,
+                    'ean': product.ean,
+                    'name': product.name,
+                    'size': product.size,
+                    'color': product.color,
+                    'stock': current_stock,
+                    'cost_price': product.cost_price,
+                    'retail_price': product.retail_price,
+                    'warehouse': warehouse
+                })
 
         return result
 
@@ -647,6 +697,64 @@ class CoreService:
 
         output.seek(0)
         return output.getvalue()
+
+    @staticmethod
+    def get_stock_optimized(db: Session, warehouse: str = None,
+                           category: str = None, size: str = None) -> List[Dict]:
+        """Получить остатки товаров (оптимизированная версия с CTE)"""
+        from sqlalchemy import text
+
+        # Базовый SQL с CTE
+        sql = """
+        WITH stock_calc AS (
+            SELECT 
+                p.*,
+                b.warehouse,
+                COALESCE(SUM(CASE WHEN s.is_returned = 0 THEN s.quantity ELSE 0 END), 0) as sold,
+                p.quantity - COALESCE(SUM(CASE WHEN s.is_returned = 0 THEN s.quantity ELSE 0 END), 0) as current_stock
+            FROM products p
+            JOIN batches b ON b.id = p.batch_id
+            LEFT JOIN sales s ON s.product_id = p.id
+            WHERE 1=1
+        """
+
+        params = {}
+
+        if warehouse:
+            sql += " AND b.warehouse = :warehouse"
+            params['warehouse'] = warehouse
+
+        if category:
+            sql += " AND p.name LIKE :category"
+            params['category'] = f'%{category}%'
+
+        if size:
+            sql += " AND p.size = :size"
+            params['size'] = size
+
+        sql += """
+            GROUP BY p.id
+        )
+        SELECT * FROM stock_calc WHERE current_stock > 0
+        """
+
+        result_proxy = db.execute(text(sql), params)
+
+        result = []
+        for row in result_proxy:
+            result.append({
+                'id': row.id,
+                'ean': row.ean,
+                'name': row.name,
+                'size': row.size,
+                'color': row.color,
+                'stock': row.current_stock,
+                'cost_price': row.cost_price,
+                'retail_price': row.retail_price,
+                'warehouse': row.warehouse
+            })
+
+        return result
 
     @staticmethod
     def get_warehouse_list(db: Session) -> List[str]:

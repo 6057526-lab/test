@@ -82,6 +82,7 @@ class Product(Base):
 
     # Ограничения
     __table_args__ = (
+        UniqueConstraint('ean', 'batch_id', name='unique_ean_per_batch'),
         CheckConstraint('quantity >= 0', name='check_quantity_positive'),
         CheckConstraint('price_eur >= 0', name='check_price_positive'),
         CheckConstraint('weight > 0', name='check_weight_positive'),
@@ -90,12 +91,6 @@ class Product(Base):
 
     def __repr__(self):
         return f"<Product({self.ean}, {self.name}, {self.size})>"
-
-    @property
-    def current_stock(self):
-        """Текущий остаток товара"""
-        sold = sum(sale.quantity for sale in self.sales)
-        return self.quantity - sold
 
     @property
     def margin(self):

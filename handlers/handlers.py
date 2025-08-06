@@ -364,15 +364,16 @@ async def select_product_for_sale(callback: CallbackQuery, state: FSMContext):
     with get_db_session() as db:
         info = CoreService.get_product_info(db, product_id)
         product = info['product']
+        current_stock = info['current_stock']  # Используем уже вычисленный остаток
 
-    await state.update_data(product_id=product_id, product=product)
+    await state.update_data(product_id=product_id, product=product, current_stock=current_stock)
 
     price_text = CURRENCY_FORMAT.format(product.retail_price) if product.retail_price else "не установлена"
 
     await callback.message.edit_text(
         f"<b>Товар:</b> {product.name}\n"
         f"<b>Размер:</b> {product.size}\n"
-        f"<b>Остаток:</b> {product.current_stock} шт.\n"
+        f"<b>Остаток:</b> {current_stock} шт.\n"
         f"<b>РРЦ:</b> {price_text}\n\n"
         f"Введите цену продажи в рублях:",
         parse_mode="HTML"
@@ -436,20 +437,32 @@ async def confirm_sale(callback: CallbackQuery, state: FSMContext):
                 sale_price=data['sale_price']
             )
 
+            # Сохраняем нужные данные до закрытия сессии
+            product_name = sale.product.name
+            sale_price = sale.sale_price
+            sale_margin = sale.margin
+
             # Получаем информацию о бонусе
             bonus = sale.bonus
-            bonus_text = ""
+            bonus_info = None
             if bonus:
-                bonus_text = f"\n<b>Бонус:</b> {CURRENCY_FORMAT.format(bonus.amount)} ({bonus.percent_used}%)"
+                bonus_info = {
+                    'amount': bonus.amount,
+                    'percent': bonus.percent_used
+                }
 
-        await callback.message.edit_text(
+        # Формируем сообщение вне сессии
+        text = (
             f"✅ <b>Продажа оформлена!</b>\n\n"
-            f"<b>Товар:</b> {sale.product.name}\n"
-            f"<b>Цена:</b> {CURRENCY_FORMAT.format(sale.sale_price)}\n"
-            f"<b>Маржа:</b> {CURRENCY_FORMAT.format(sale.margin)}"
-            f"{bonus_text}",
-            parse_mode="HTML"
+            f"<b>Товар:</b> {product_name}\n"
+            f"<b>Цена:</b> {CURRENCY_FORMAT.format(sale_price)}\n"
+            f"<b>Маржа:</b> {CURRENCY_FORMAT.format(sale_margin)}"
         )
+
+        if bonus_info:
+            text += f"\n<b>Бонус:</b> {CURRENCY_FORMAT.format(bonus_info['amount'])} ({bonus_info['percent']}%)"
+
+        await callback.message.edit_text(text, parse_mode="HTML")
 
     except Exception as e:
         await callback.message.edit_text(
