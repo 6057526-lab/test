@@ -2,13 +2,14 @@
 handlers/sales_handlers.py
 Продажи и остатки - функции доступные и админам и продавцам
 """
-from aiogram import Router, F
+from aiogram import Router, F, types
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from data.db import get_db_session
 from services.core_service import CoreService
+from utils.tools import export_stock_to_excel
 from config import CURRENCY_FORMAT, PERCENT_FORMAT
 from handlers import (
     SaleStates, is_admin, get_cancel_back_keyboard,
@@ -428,23 +429,81 @@ async def select_product_for_sale(callback: CallbackQuery, state: FSMContext):
         info = CoreService.get_product_info(db, product_id)
         product = info['product']
         current_stock = info['current_stock']
+        last_sale_price = CoreService.get_last_sale_price(db, product_id)
 
     await state.update_data(product_id=product_id, product=product, current_stock=current_stock)
 
     price_text = CURRENCY_FORMAT.format(product.retail_price) if product.retail_price else "не установлена"
+    recommend_buttons = []
+    if product.retail_price:
+        recommend_buttons.append(InlineKeyboardButton(text=f"РРЦ {CURRENCY_FORMAT.format(product.retail_price)}", callback_data=f"use_price_rrc_{product.id}"))
+    # Рекомендации от себестоимости 10/20/30%
+    for pct in (10, 20, 30):
+        rec = round(product.cost_price * (1 + pct/100), 2)
+        recommend_buttons.append(InlineKeyboardButton(text=f"+{pct}% ({CURRENCY_FORMAT.format(rec)})", callback_data=f"use_price_pct_{pct}_{product.id}"))
+    if last_sale_price:
+        recommend_buttons.append(InlineKeyboardButton(text=f"Посл. цена {CURRENCY_FORMAT.format(last_sale_price)}", callback_data=f"use_price_last_{product.id}"))
 
     keyboard = get_cancel_back_keyboard()
+    # Вставляем ряд рекомендательных кнопок
+    kb_builder = InlineKeyboardBuilder()
+    for btn in recommend_buttons:
+        kb_builder.add(btn)
+    kb_builder.adjust(2)
+    # затем добавляем отмену/назад
+    kb_builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
+        get_back_button()
+    )
 
     await callback.message.edit_text(
         f"<b>Товар:</b> {product.name}\n"
         f"<b>Размер:</b> {product.size}\n"
         f"<b>Остаток:</b> {current_stock} шт.\n"
         f"<b>РРЦ:</b> {price_text}\n\n"
-        f"Введите цену продажи в рублях:",
-        reply_markup=keyboard,
+        f"Введите цену продажи в рублях или выберите рекомендацию ниже:",
+        reply_markup=kb_builder.as_markup(),
         parse_mode="HTML"
     )
     await state.set_state(SaleStates.waiting_for_price)
+    await callback.answer()
+
+@router.callback_query(SaleStates.waiting_for_price, F.data.startswith("use_price_rrc_"))
+async def use_rrc_price(callback: CallbackQuery, state: FSMContext):
+    product_id = int(callback.data.replace("use_price_rrc_", ""))
+    data = await state.get_data()
+    product = data.get('product')
+    if not product or product.id != product_id or not product.retail_price:
+        await callback.answer("Цена недоступна", show_alert=True)
+        return
+    await state.update_data(sale_price=float(product.retail_price))
+    await callback.message.answer(f"Выбрана цена: {CURRENCY_FORMAT.format(product.retail_price)}")
+    await callback.answer()
+
+@router.callback_query(SaleStates.waiting_for_price, F.data.startswith("use_price_pct_"))
+async def use_pct_price(callback: CallbackQuery, state: FSMContext):
+    _, _, pct_str, product_id_str = callback.data.split('_', 3)
+    pct = float(pct_str)
+    data = await state.get_data()
+    product = data.get('product')
+    if not product or str(product.id) != product_id_str:
+        await callback.answer("Цена недоступна", show_alert=True)
+        return
+    rec = round(product.cost_price * (1 + pct/100), 2)
+    await state.update_data(sale_price=float(rec))
+    await callback.message.answer(f"Выбрана цена: {CURRENCY_FORMAT.format(rec)}")
+    await callback.answer()
+
+@router.callback_query(SaleStates.waiting_for_price, F.data.startswith("use_price_last_"))
+async def use_last_price(callback: CallbackQuery, state: FSMContext):
+    product_id = int(callback.data.replace("use_price_last_", ""))
+    with get_db_session() as db:
+        last_price = CoreService.get_last_sale_price(db, product_id)
+    if not last_price:
+        await callback.answer("Нет данных о последней цене", show_alert=True)
+        return
+    await state.update_data(sale_price=float(last_price))
+    await callback.message.answer(f"Выбрана цена: {CURRENCY_FORMAT.format(last_price)}")
     await callback.answer()
 
 @router.message(SaleStates.waiting_for_price)
@@ -583,8 +642,8 @@ async def stock_view(message: Message):
     )
 
 @router.callback_query(F.data.startswith("stock_wh_"))
-async def show_stock(callback: CallbackQuery):
-    """Показать остатки по складу"""
+async def show_stock(callback: CallbackQuery, state: FSMContext):
+    """Показать остатки по складу с улучшенной навигацией"""
     warehouse = callback.data.replace("stock_wh_", "")
     warehouse = None if warehouse == "all" else warehouse
 
@@ -604,27 +663,14 @@ async def show_stock(callback: CallbackQuery):
         await callback.answer()
         return
 
-    # Формируем сообщение с остатками
-    text = f"📦 <b>Остатки{f' на складе {warehouse}' if warehouse else ' (все склады)'}</b>\n\n"
-
-    for i, item in enumerate(stock[:20], 1):  # Показываем первые 20
-        text += (
-            f"{i}. <b>{item['name']}</b>\n"
-            f"   Размер: {item['size']}, Цвет: {item['color']}\n"
-            f"   Остаток: {item['stock']} шт.\n"
-            f"   РРЦ: {CURRENCY_FORMAT.format(item['retail_price'] or 0)}\n"
-            f"   Склад: {item['warehouse']}\n\n"
-        )
-
-    if len(stock) > 20:
-        text += f"\n<i>Показаны первые 20 из {len(stock)} товаров</i>"
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"stock_wh_{warehouse if warehouse else 'all'}")],
-        [get_back_button()]
-    ])
-
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    # Сохраняем данные и показываем улучшенный список
+    await state.update_data(
+        stock_items=stock,
+        stock_warehouse=warehouse,
+        stock_sort="name",
+        stock_page=0
+    )
+    await _render_stock_list(callback, state)
     await callback.answer()
 
 @router.callback_query(F.data == "refresh_stock")
@@ -632,6 +678,121 @@ async def refresh_stock(callback: CallbackQuery):
     """Обновить список остатков"""
     await stock_view(callback.message)
     await callback.answer("🔄 Остатки обновлены")
+
+
+def _sort_stock(items: list, sort_key: str) -> list:
+    """Сортировка остатков по различным критериям"""
+    if sort_key == "stock":
+        return sorted(items, key=lambda x: (x.get('stock') or 0), reverse=True)
+    if sort_key == "price":
+        return sorted(items, key=lambda x: (x.get('retail_price') or 0), reverse=True)
+    # По умолчанию: по имени A→Z
+    return sorted(items, key=lambda x: (x.get('name') or '').lower())
+
+
+async def _render_stock_list(callback: CallbackQuery, state: FSMContext):
+    """Отрисовка улучшенного списка остатков с навигацией"""
+    data = await state.get_data()
+    items = data.get('stock_items', [])
+    warehouse = data.get('stock_warehouse')
+    sort_key = data.get('stock_sort', 'name')
+    page = int(data.get('stock_page', 0))
+
+    sorted_items = _sort_stock(items, sort_key)
+    page_size = 8
+    total_pages = (len(sorted_items) + page_size - 1) // page_size
+    page = max(0, min(page, max(total_pages - 1, 0)))
+    start = page * page_size
+    end = min(start + page_size, len(sorted_items))
+    page_items = sorted_items[start:end]
+
+    # Заголовок с информацией
+    header = f"📦 <b>Остатки{f' на складе {warehouse}' if warehouse else ' (все склады)'}</b>\n"
+    sort_names = {"name": "A→Z", "stock": "По остатку", "price": "По цене"}
+    header += f"🔹 Сортировка: {sort_names.get(sort_key, 'A→Z')}\n"
+    header += f"📄 Страница {page+1} из {max(total_pages,1)} | Всего: {len(items)} товаров\n\n"
+
+    # Компактный список товаров
+    lines = []
+    for i, item in enumerate(page_items, start=start+1):
+        price = CURRENCY_FORMAT.format(item.get('retail_price') or 0)
+        stock = item.get('stock', 0)
+        stock_emoji = "🔴" if stock <= 2 else "🟡" if stock <= 5 else "🟢"
+        
+        lines.append(
+            f"{i}. <b>{item.get('name')}</b> — {price}\n"
+            f"   {stock_emoji} {stock} шт. | 🔹 {item.get('size') or '-'} | 📦 {item.get('warehouse')}"
+        )
+    
+    text = header + ("\n\n".join(lines) if lines else "Нет товаров для показа")
+
+    # Клавиатура с навигацией
+    kb = InlineKeyboardBuilder()
+    
+    # Сортировка
+    kb.button(text="A→Z", callback_data="stock_sort_name")
+    kb.button(text="По остатку", callback_data="stock_sort_stock") 
+    kb.button(text="По цене", callback_data="stock_sort_price")
+    kb.row()
+    
+    # Пагинация
+    if page > 0:
+        kb.button(text="◀️", callback_data=f"stock_page_{page-1}")
+    if page < total_pages - 1:
+        kb.button(text="▶️", callback_data=f"stock_page_{page+1}")
+    kb.row()
+    
+    # Экспорт
+    kb.button(text="📤 Экспорт в Excel", callback_data="stock_export")
+    kb.row(get_back_button())
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.in_(["stock_sort_name", "stock_sort_stock", "stock_sort_price"]))
+async def stock_change_sort(callback: CallbackQuery, state: FSMContext):
+    """Изменение сортировки остатков"""
+    sort_map = {
+        "stock_sort_name": "name",
+        "stock_sort_stock": "stock", 
+        "stock_sort_price": "price",
+    }
+    await state.update_data(stock_sort=sort_map.get(callback.data, "name"), stock_page=0)
+    await _render_stock_list(callback, state)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("stock_page_"))
+async def stock_change_page(callback: CallbackQuery, state: FSMContext):
+    """Навигация по страницам остатков"""
+    try:
+        page = int(callback.data.replace("stock_page_", ""))
+    except ValueError:
+        page = 0
+    await state.update_data(stock_page=page)
+    await _render_stock_list(callback, state)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "stock_export")
+async def stock_export_excel(callback: CallbackQuery, state: FSMContext):
+    """Экспорт текущего набора остатков в Excel"""
+    data = await state.get_data()
+    items = data.get('stock_items', [])
+    if not items:
+        await callback.answer("Нет данных для экспорта", show_alert=True)
+        return
+    
+    try:
+        excel_bytes = export_stock_to_excel(items)
+        await callback.message.answer_document(
+            types.BufferedInputFile(excel_bytes, filename="stock_export.xlsx"),
+            caption="📤 Остатки (текущий набор)"
+        )
+        await callback.answer("✅ Экспорт готов")
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка экспорта: {str(e)}", show_alert=True)
+
 
 def register_handlers(dp):
     """Регистрация хендлеров продаж и остатков"""

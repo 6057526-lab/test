@@ -235,3 +235,90 @@ def generate_sale_receipt(sale) -> str:
         f"<b>Продавец:</b> {sale.agent.full_name}\n"
         f"<b>Склад:</b> {sale.warehouse}\n"
     )
+
+
+# === РЕНДЕР ГРАФИКОВ ===
+def render_sales_timeseries_png(points: List[Dict]) -> bytes:
+    """Рендер PNG графика продаж по дням: выручка и маржа"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    dates = [p['date'] for p in points]
+    revenue = [p['revenue'] for p in points]
+    margin = [p['margin'] for p in points]
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(dates, revenue, label='Выручка', color='#1f77b4')
+    ax.plot(dates, margin, label='Маржа', color='#ff7f0e')
+    ax.set_title('Продажи по дням')
+    ax.set_xlabel('Дата')
+    ax.set_ylabel('Сумма, ₽')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.autofmt_xdate(rotation=45)
+
+    buf = BytesIO()
+    plt.tight_layout()
+    plt.savefig(buf, format='png', dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def render_margin_by_category_png(cat_to_value: Dict[str, float]) -> bytes:
+    """Рендер PNG горизонтального барчарта маржи по категориям"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    cats = list(cat_to_value.keys())
+    values = list(cat_to_value.values())
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.barh(cats, values, color='#2ca02c')
+    ax.set_title('Маржа по категориям')
+    ax.set_xlabel('Маржа, ₽')
+    ax.grid(True, axis='x', alpha=0.3)
+
+    buf = BytesIO()
+    plt.tight_layout()
+    plt.savefig(buf, format='png', dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def render_dual_axis_price_sales_png(price_points: List[Dict], sales_points: List[Dict]) -> bytes:
+    """Рендер комбинированного графика: РРЦ (линия) + продажи (столбцы)"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from datetime import datetime
+
+    # Подготовка данных
+    price_dates = [p['ts'] if isinstance(p['ts'], datetime) else p['ts'] for p in price_points]
+    price_values = [p.get('new') or p.get('old') or 0 for p in price_points]
+
+    sales_dates = [s['date'] for s in sales_points]
+    sales_qty = [s['qty'] for s in sales_points]
+
+    fig, ax1 = plt.subplots(figsize=(10, 4))
+    ax1.plot(price_dates, price_values, color='#1f77b4', label='РРЦ')
+    ax1.set_ylabel('РРЦ, ₽', color='#1f77b4')
+    ax1.tick_params(axis='y', labelcolor='#1f77b4')
+
+    ax2 = ax1.twinx()
+    ax2.bar(sales_dates, sales_qty, color='#ff7f0e', alpha=0.4, label='Кол-во продаж')
+    ax2.set_ylabel('Продажи, шт.', color='#ff7f0e')
+    ax2.tick_params(axis='y', labelcolor='#ff7f0e')
+
+    plt.title('Динамика РРЦ и продаж по товару')
+    fig.autofmt_xdate(rotation=45)
+
+    buf = BytesIO()
+    plt.tight_layout()
+    plt.savefig(buf, format='png', dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()

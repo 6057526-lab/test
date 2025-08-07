@@ -17,6 +17,16 @@ class BatchStates(StatesGroup):
 class PriceStates(StatesGroup):
     waiting_for_product = State()
     waiting_for_price = State()
+    # Расширенные состояния для фильтров и массовых операций
+    choosing_filter = State()
+    filter_by_category = State()
+    filter_by_size = State()
+    filter_by_age = State()
+    filter_by_warehouse = State()
+    filter_by_color = State()
+    bulk_percent_input = State()
+    bulk_fixed_input = State()
+    bulk_preview_confirm = State()
 
 class SaleStates(StatesGroup):
     waiting_for_product = State()
@@ -38,6 +48,10 @@ class ReturnStates(StatesGroup):
 
 class BonusStates(StatesGroup):
     waiting_for_confirmation = State()
+
+# === СОСТОЯНИЯ ГРАФИКОВ ===
+class ChartStates(StatesGroup):
+    waiting_for_product_query = State()
 
 # === ОБЩИЕ ФУНКЦИИ ===
 def is_admin(user_id: int) -> bool:
@@ -62,7 +76,8 @@ def get_admin_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text="📅 Приемка партии"), KeyboardButton(text="💳 Установить цены")],
         [KeyboardButton(text="🚀 Продажа"), KeyboardButton(text="📦 Остатки")],
-        [KeyboardButton(text="🎁 Бонусы"), KeyboardButton(text="📊 Отчёты")],
+        [KeyboardButton(text="🏒 Подбор экипировки"), KeyboardButton(text="🎁 Бонусы")],
+        [KeyboardButton(text="📊 Отчёты"), KeyboardButton(text="📈 Графики")],
         [KeyboardButton(text="↩️ Возврат"), KeyboardButton(text="⚙️ Настройки")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -71,7 +86,8 @@ def get_seller_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура продавца"""
     keyboard = [
         [KeyboardButton(text="🚀 Продать"), KeyboardButton(text="📦 Мои остатки")],
-        [KeyboardButton(text="🎁 Мой бонус"), KeyboardButton(text="📈 История продаж")]
+        [KeyboardButton(text="🏒 Подбор экипировки"), KeyboardButton(text="🎁 Мой бонус")],
+        [KeyboardButton(text="📈 История продаж")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -122,8 +138,9 @@ async def show_main_menu(message_or_callback, is_admin_user: bool = None):
 def register_all_handlers(dp: Dispatcher):
     """Регистрация всех хендлеров"""
     # Импортируем здесь, чтобы избежать циклических импортов
-    from . import admin_handlers, sales_handlers, user_handlers
+    from . import admin_handlers, sales_handlers, user_handlers, gear_handlers
 
     user_handlers.register_handlers(dp)      # Основные: старт, меню, навигация
     sales_handlers.register_handlers(dp)     # Продажи, остатки (общие)
     admin_handlers.register_handlers(dp)     # Админские функции
+    gear_handlers.register_handlers(dp)      # Подбор экипировки

@@ -5,6 +5,7 @@ handlers/admin_handlers.py
 import os
 from datetime import datetime, timedelta
 from aiogram import Router, F, types
+from aiogram.filters import StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -13,9 +14,9 @@ from data.db import get_db_session
 from data.models import Agent, Sale
 from services.core_service import CoreService
 from config import UPLOADS_DIR, CURRENCY_FORMAT, PERCENT_FORMAT
-from utils.tools import create_sales_report
+from utils.tools import create_sales_report, render_sales_timeseries_png, render_margin_by_category_png
 from handlers import (
-    BatchStates, PriceStates, ReturnStates,
+    BatchStates, PriceStates, ReturnStates, ChartStates,
     is_admin, get_cancel_back_keyboard, get_back_button
 )
 
@@ -69,6 +70,21 @@ async def process_batch_file(message: Message, state: FSMContext):
         keyboard = get_cancel_back_keyboard()
         await message.reply(
             "❌ Пожалуйста, загрузите Excel файл (.xlsx или .xls)",
+            reply_markup=keyboard
+        )
+        return
+
+    # Проверяем размер файла
+    try:
+        file_size = document.file_size or 0
+    except Exception:
+        file_size = 0
+
+    from config import MAX_EXCEL_FILE_SIZE
+    if file_size and file_size > MAX_EXCEL_FILE_SIZE:
+        keyboard = get_cancel_back_keyboard()
+        await message.reply(
+            "❌ Файл слишком большой. Максимальный размер 10 MB",
             reply_markup=keyboard
         )
         return
@@ -159,15 +175,23 @@ async def price_start(message: Message, state: FSMContext):
         await message.reply("❌ Эта функция доступна только администраторам")
         return
 
-    keyboard = get_cancel_back_keyboard()
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="🔍 Поиск по названию/EAN", callback_data="price_search_text")
+    keyboard.button(text="📂 Фильтры (массово)", callback_data="price_search_filters")
+    keyboard.button(text="📋 Все товары в наличии", callback_data="price_search_all")
+    keyboard.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
+        get_back_button()
+    )
+    keyboard.adjust(1)
 
     await message.reply(
         "💳 <b>Установка розничной цены</b>\n\n"
-        "Введите EAN или название товара для поиска:",
-        reply_markup=keyboard,
+        "Как будем выбирать товары?",
+        reply_markup=keyboard.as_markup(),
         parse_mode="HTML"
     )
-    await state.set_state(PriceStates.waiting_for_product)
+    await state.set_state(PriceStates.choosing_filter)
 
 @router.message(PriceStates.waiting_for_product)
 async def search_product_for_price(message: Message, state: FSMContext):
@@ -278,6 +302,295 @@ async def set_new_price(message: Message, state: FSMContext):
     )
     await state.clear()
 
+# === РАСШИРЕННЫЙ ПОИСК ДЛЯ МАССОВОЙ УСТАНОВКИ ===
+@router.callback_query(PriceStates.choosing_filter, F.data == "price_search_text")
+async def price_search_text(callback: CallbackQuery, state: FSMContext):
+    keyboard = get_cancel_back_keyboard()
+    await callback.message.edit_text(
+        "💳 <b>Установка розничной цены</b>\n\nВведите EAN или название товара:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await state.set_state(PriceStates.waiting_for_product)
+    await callback.answer()
+
+@router.callback_query(PriceStates.choosing_filter, F.data == "price_search_filters")
+async def price_search_filters(callback: CallbackQuery, state: FSMContext):
+    """Меню фильтров как в продаже для массовой проставки цен"""
+    keyboard = InlineKeyboardBuilder()
+    with get_db_session() as db:
+        available_data = CoreService.get_available_filter_values(db)
+
+    if available_data['categories']:
+        keyboard.button(text="🏒 По категории", callback_data="price_filter_category")
+    if available_data['sizes']:
+        keyboard.button(text="📏 По размеру", callback_data="price_filter_size")
+    if available_data['ages']:
+        keyboard.button(text="👥 По возрасту", callback_data="price_filter_age")
+    if available_data['warehouses']:
+        keyboard.button(text="📦 По складу", callback_data="price_filter_warehouse")
+    if available_data['colors']:
+        keyboard.button(text="🎨 По цвету", callback_data="price_filter_color")
+
+    keyboard.row(
+        InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main"),
+        get_back_button()
+    )
+    keyboard.adjust(2)
+
+    await callback.message.edit_text(
+        "📂 <b>Фильтры для массовой установки цен</b>\n\nВыберите критерий:",
+        reply_markup=keyboard.as_markup(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(PriceStates.choosing_filter, F.data == "price_search_all")
+async def price_search_all(callback: CallbackQuery, state: FSMContext):
+    """Выбрать все товары с наличием и показать массовые действия"""
+    with get_db_session() as db:
+        products = CoreService.select_products_for_bulk_pricing(db, only_in_stock=True, limit=None)
+        product_ids = [p.id for p in products]
+
+    if not product_ids:
+        await callback.message.edit_text(
+            "❌ Нет товаров в наличии",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[get_back_button()]]),
+        )
+        await callback.answer()
+        return
+
+    await _show_bulk_actions(callback, state, product_ids)
+
+def _render_bulk_price_preview(products, increase_percent: float | None, new_price: float | None) -> str:
+    header = "🧮 <b>Массовая установка цен</b>\n\n"
+    if increase_percent is not None:
+        mode_line = f"Режим: повышение на {increase_percent}%\n"
+    else:
+        mode_line = f"Режим: установка фиксированной цены {CURRENCY_FORMAT.format(new_price or 0)}\n"
+    count_line = f"Выбрано товаров: {len(products)} (показаны первые 10)\n\n"
+    lines = []
+    for p in products[:10]:
+        old = p.retail_price or 0
+        if increase_percent is not None:
+            newp = round(old * (1 + increase_percent / 100), 2)
+        else:
+            newp = new_price or 0
+        lines.append(f"• {p.name} ({p.size}) — {CURRENCY_FORMAT.format(old)} → {CURRENCY_FORMAT.format(newp)}")
+    return header + mode_line + count_line + "\n".join(lines)
+
+async def _show_bulk_actions(callback: CallbackQuery, state: FSMContext, product_ids: list[int]):
+    await state.update_data(bulk_product_ids=product_ids)
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="⬆️ Повысить на %", callback_data="bulk_price_percent")
+    keyboard.button(text="💲 Установить фикс. цену", callback_data="bulk_price_fixed")
+    keyboard.button(text="👀 Предпросмотр", callback_data="bulk_price_preview")
+    keyboard.row(get_back_button())
+    keyboard.adjust(2)
+    await callback.message.edit_text(
+        "🧮 <b>Массовая установка цен</b>\nВыберите режим:",
+        reply_markup=keyboard.as_markup(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("price_filter_"))
+async def price_filters_select(callback: CallbackQuery, state: FSMContext):
+    """Выбор по конкретному значению фильтра и показ действий"""
+    data_key = callback.data.replace("price_filter_", "")
+    with get_db_session() as db:
+        # Загружаем конкретные значения
+        if data_key == 'category':
+            options = CoreService.get_product_categories_in_stock(db)
+            items = sorted(options.keys())
+        elif data_key == 'size':
+            options = CoreService.get_available_sizes_in_stock(db)
+            items = sorted(options.keys())
+        elif data_key == 'age':
+            options = CoreService.get_available_ages_in_stock(db)
+            items = sorted(options.keys())
+        elif data_key == 'warehouse':
+            options = CoreService.get_warehouses_with_stock(db)
+            items = sorted(options.keys())
+        elif data_key == 'color':
+            items = sorted(CoreService.get_available_filter_values(db)['colors'])
+        else:
+            items = []
+
+    keyboard = InlineKeyboardBuilder()
+    for value in items[:60]:  # ограничим список
+        keyboard.button(text=str(value), callback_data=f"price_pick_{data_key}_{value}")
+    keyboard.row(get_back_button())
+    keyboard.adjust(2)
+    await callback.message.edit_text(
+        f"Выберите значение: ({data_key})",
+        reply_markup=keyboard.as_markup()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("price_pick_"))
+async def price_pick_apply(callback: CallbackQuery, state: FSMContext):
+    """Применение фильтра и выбор режима массовой установки"""
+    _, key, value = callback.data.split('_', 2)
+    with get_db_session() as db:
+        selected = CoreService.select_products_for_bulk_pricing(
+            db,
+            category=value if key == 'category' else None,
+            size=value if key == 'size' else None,
+            age=value if key == 'age' else None,
+            warehouse=value if key == 'warehouse' else None,
+            color=value if key == 'color' else None,
+        )
+        product_ids = [p.id for p in selected]
+
+    await _show_bulk_actions(callback, state, product_ids)
+
+@router.callback_query(F.data == "bulk_price_percent")
+async def bulk_price_percent(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(PriceStates.bulk_percent_input)
+    keyboard = get_cancel_back_keyboard()
+    await callback.message.edit_text(
+        "Введите процент повышения (например, 5 или 7.5)",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+@router.message(PriceStates.bulk_percent_input)
+async def bulk_price_percent_input(message: Message, state: FSMContext):
+    try:
+        inc = float(message.text.replace(',', '.'))
+    except ValueError:
+        await message.reply("❌ Введите число, например 5 или 7.5", reply_markup=get_cancel_back_keyboard())
+        return
+
+    data = await state.get_data()
+    product_ids = data.get('bulk_product_ids', [])
+    if not product_ids:
+        await message.reply("❌ Не выбраны товары", reply_markup=get_cancel_back_keyboard())
+        return
+
+    with get_db_session() as db:
+        # Сохраняем выбранный режим для предпросмотра/подтверждения
+        await state.update_data(bulk_inc_percent=inc, bulk_fixed_price=None)
+        changed = CoreService.bulk_update_retail_price_by_ids(
+            db, product_ids, increase_percent=inc, changed_by_id=message.from_user.id
+        )
+
+    await state.clear()
+    await message.reply(
+        f"✅ Изменено цен у {changed} товаров (повышение на {inc}%)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[get_back_button()]])
+    )
+
+@router.callback_query(F.data == "bulk_price_fixed")
+async def bulk_price_fixed(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(PriceStates.bulk_fixed_input)
+    keyboard = get_cancel_back_keyboard()
+    await callback.message.edit_text(
+        "Введите новую фиксированную цену (руб.)",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+@router.message(PriceStates.bulk_fixed_input)
+async def bulk_price_fixed_input(message: Message, state: FSMContext):
+    try:
+        new_price = float(message.text.replace(',', '.'))
+        if new_price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.reply("❌ Введите корректную цену (число > 0)", reply_markup=get_cancel_back_keyboard())
+        return
+
+    data = await state.get_data()
+    product_ids = data.get('bulk_product_ids', [])
+    if not product_ids:
+        await message.reply("❌ Не выбраны товары", reply_markup=get_cancel_back_keyboard())
+        return
+
+    with get_db_session() as db:
+        await state.update_data(bulk_inc_percent=None, bulk_fixed_price=new_price)
+        changed = CoreService.bulk_update_retail_price_by_ids(
+            db, product_ids, new_price=new_price, changed_by_id=message.from_user.id
+        )
+
+    await state.clear()
+    await message.reply(
+        f"✅ Установлена цена {CURRENCY_FORMAT.format(new_price)} у {changed} товаров",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[get_back_button()]])
+    )
+
+@router.callback_query(F.data == "bulk_price_preview")
+async def bulk_price_preview(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    product_ids = data.get('bulk_product_ids', [])
+    inc = data.get('bulk_inc_percent')
+    fixed = data.get('bulk_fixed_price')
+
+    if not product_ids:
+        await callback.answer("Нет выбранных товаров", show_alert=True)
+        return
+
+    if inc is None and fixed is None:
+        # Если режим не выбран — попросим сначала указать процент или цену
+        await callback.answer("Сначала выберите режим (процент или фикс. цену)", show_alert=True)
+        return
+
+    with get_db_session() as db:
+        preview = CoreService.preview_bulk_price_update(
+            db, product_ids,
+            new_price=fixed, increase_percent=inc, limit=20
+        )
+
+    if not preview:
+        await callback.message.edit_text("Нет данных для предпросмотра", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[get_back_button()]]))
+        await callback.answer()
+        return
+
+    # Формируем текст предпросмотра
+    lines = ["👀 <b>Предпросмотр изменений цен</b>", "", "Товар — старая → новая (Δ%)", ""]
+    for item in preview:
+        lines.append(
+            f"• {item['name']} ({item['size'] or '-'}): "
+            f"{CURRENCY_FORMAT.format(item['old'])} → {CURRENCY_FORMAT.format(item['new'])} "
+            f"({item['diff_percent']}%)"
+        )
+    text = "\n".join(lines)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data="bulk_price_apply")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")],
+        [get_back_button()]
+    ])
+
+    await state.set_state(PriceStates.bulk_preview_confirm)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(PriceStates.bulk_preview_confirm, F.data == "bulk_price_apply")
+async def bulk_price_apply(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    product_ids = data.get('bulk_product_ids', [])
+    inc = data.get('bulk_inc_percent')
+    fixed = data.get('bulk_fixed_price')
+
+    if not product_ids:
+        await callback.answer("Нет выбранных товаров", show_alert=True)
+        return
+
+    with get_db_session() as db:
+        changed = CoreService.bulk_update_retail_price_by_ids(
+            db, product_ids, new_price=fixed, increase_percent=inc, changed_by_id=callback.from_user.id
+        )
+
+    await state.clear()
+    await callback.message.edit_text(
+        f"✅ Применено к {changed} товарам",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[get_back_button()]])
+    )
+    await callback.answer()
+
+
 # === ВОЗВРАТЫ ===
 @router.message(F.text == "↩️ Возврат")
 async def return_start(message: Message, state: FSMContext):
@@ -310,7 +623,7 @@ async def return_sale_id(message: Message, state: FSMContext):
         return
 
     with get_db_session() as db:
-        sale = db.query(Sale).get(sale_id)
+        sale = db.get(Sale, sale_id)
 
         if not sale:
             keyboard = get_cancel_back_keyboard()
@@ -437,6 +750,82 @@ async def generate_report(callback: CallbackQuery):
 
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     await callback.answer()
+
+# === ГРАФИКИ (админ) ===
+@router.message(F.text == "📈 Графики")
+async def charts_menu(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.reply("❌ Эта функция доступна только администраторам")
+        return
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📈 Продажи: 7 дней", callback_data="chart_sales_7")
+    kb.button(text="📈 Продажи: 30 дней", callback_data="chart_sales_30")
+    kb.button(text="📈 Продажи: 90 дней", callback_data="chart_sales_90")
+    kb.button(text="📊 Категории: 30 дней", callback_data="chart_margin_cats_30")
+    kb.button(text="📊 Категории: 90 дней", callback_data="chart_margin_cats_90")
+    kb.button(text="🏷 По товару (РРЦ/продажи)", callback_data="chart_product_pick")
+    kb.row(get_back_button())
+    kb.adjust(1)
+    await message.reply("📈 <b>Графики</b>\nВыберите график:", reply_markup=kb.as_markup(), parse_mode="HTML")
+
+@router.callback_query(F.data.in_(["chart_sales_7", "chart_sales_30", "chart_sales_90"]))
+async def chart_sales_period(callback: CallbackQuery):
+    mapping = {"chart_sales_7": 7, "chart_sales_30": 30, "chart_sales_90": 90}
+    days = mapping.get(callback.data, 30)
+    with get_db_session() as db:
+        points = CoreService.get_sales_timeseries(db, days=days)
+    if not points:
+        await callback.message.edit_text("Нет данных для графика", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[get_back_button()]]))
+        await callback.answer()
+        return
+    png = render_sales_timeseries_png(points)
+    await callback.message.answer_photo(types.BufferedInputFile(png, filename=f"sales_{days}.png"), caption=f"Продажи за {days} дней")
+    await callback.answer()
+
+@router.callback_query(F.data.in_(["chart_margin_cats_30", "chart_margin_cats_90"]))
+async def chart_margin_cats_period(callback: CallbackQuery):
+    mapping = {"chart_margin_cats_30": 30, "chart_margin_cats_90": 90}
+    days = mapping.get(callback.data, 30)
+    with get_db_session() as db:
+        cat_map = CoreService.get_margin_by_category(db, days=days)
+    if not cat_map:
+        await callback.message.edit_text("Нет данных для графика", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[get_back_button()]]))
+        await callback.answer()
+        return
+    png = render_margin_by_category_png(cat_map)
+    await callback.message.answer_photo(types.BufferedInputFile(png, filename=f"margin_cats_{days}.png"), caption=f"Маржа по категориям ({days} дней)")
+    await callback.answer()
+
+@router.callback_query(F.data == "chart_product_pick")
+async def chart_product_pick(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ChartStates.waiting_for_product_query)
+    await callback.message.edit_text(
+        "Введите EAN или название товара для построения графика (90 дней):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[get_back_button()]])
+    )
+    await callback.answer()
+
+@router.message(StateFilter(ChartStates.waiting_for_product_query), F.text)
+async def chart_product_query(message: Message, state: FSMContext):
+    query = message.text
+    with get_db_session() as db:
+        items = CoreService.search_products(db, query)
+    if not items:
+        await message.reply("Товары не найдены. Попробуйте другой запрос.")
+        return
+    # Берём первый совпавший для простоты
+    product = items[0]['product']
+    pid = product.id
+    with get_db_session() as db:
+        price_ts = CoreService.get_product_price_timeseries(db, pid, days=90)
+        sales_ts = CoreService.get_product_sales_timeseries(db, pid, days=90)
+    from utils.tools import render_dual_axis_price_sales_png
+    png = render_dual_axis_price_sales_png(price_ts, sales_ts)
+    await message.answer_photo(
+        types.BufferedInputFile(png, filename=f"product_{pid}_90.png"),
+        caption=f"{product.name} — РРЦ и продажи (90 дней)"
+    )
+    await state.clear()
 
 # === НАСТРОЙКИ ===
 @router.message(F.text == "⚙️ Настройки")

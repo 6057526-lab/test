@@ -144,7 +144,7 @@ async def show_agent_bonuses(callback: CallbackQuery):
     agent_id = int(callback.data.replace("bonus_agent_", ""))
 
     with get_db_session() as db:
-        agent = db.query(Agent).get(agent_id)
+        agent = db.get(Agent, agent_id)
         bonuses = CoreService.get_agent_bonuses(db, agent_id)
 
         total_unpaid = sum(b.amount for b in bonuses if not b.is_paid)
@@ -193,7 +193,7 @@ async def pay_agent_bonus(callback: CallbackQuery):
 
     with get_db_session() as db:
         amount = CoreService.pay_bonuses(db, agent_id, callback.from_user.id)
-        agent = db.query(Agent).get(agent_id)
+        agent = db.get(Agent, agent_id)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ К списку", callback_data="back_to_agents")],
@@ -215,7 +215,7 @@ async def reset_bonus_confirmation(callback: CallbackQuery, state: FSMContext):
     agent_id = int(callback.data.replace("reset_bonus_", ""))
 
     with get_db_session() as db:
-        agent = db.query(Agent).get(agent_id)
+        agent = db.get(Agent, agent_id)
         unpaid_bonuses = db.query(Bonus).filter(
             Bonus.agent_id == agent_id,
             Bonus.is_paid == False
@@ -252,7 +252,7 @@ async def confirm_reset_bonus(callback: CallbackQuery, state: FSMContext):
     try:
         with get_db_session() as db:
             # Получаем информацию об агенте
-            agent = db.query(Agent).get(agent_id)
+            agent = db.get(Agent, agent_id)
 
             # Находим все невыплаченные бонусы
             unpaid_bonuses = db.query(Bonus).filter(

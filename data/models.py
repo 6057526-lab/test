@@ -59,8 +59,8 @@ class Product(Base):
     name = Column(String(200), nullable=False)
     model = Column(String(100))
     color = Column(String(50))
-    size = Column(String(20))
-    age = Column(String(20))
+    size = Column(String(20), index=True)
+    age = Column(String(20), index=True)
     fit = Column(String(20))
     weight = Column(Float, nullable=False)
 
@@ -74,7 +74,7 @@ class Product(Base):
     retail_price = Column(Float)  # РРЦ в рублях
 
     # Связи
-    batch_id = Column(Integer, ForeignKey('batches.id'), nullable=False)
+    batch_id = Column(Integer, ForeignKey('batches.id'), nullable=False, index=True)
     batch = relationship("Batch", back_populates="products")
     sales = relationship("Sale", back_populates="product")
     price_history = relationship("PriceHistory", back_populates="product")
@@ -113,13 +113,13 @@ class Sale(Base):
 
     id = Column(Integer, primary_key=True)
     product_id = Column(Integer, ForeignKey('products.id'), nullable=False)
-    agent_id = Column(Integer, ForeignKey('agents.id'), nullable=False)
+    agent_id = Column(Integer, ForeignKey('agents.id'), nullable=False, index=True)
     quantity = Column(Integer, default=1, nullable=False)
     sale_price = Column(Float, nullable=False)
     margin = Column(Float, nullable=False)
     margin_percent = Column(Float, nullable=False)
     warehouse = Column(String(100), nullable=False)
-    sale_date = Column(DateTime, default=datetime.utcnow)
+    sale_date = Column(DateTime, default=datetime.utcnow, index=True)
     is_returned = Column(Boolean, default=False)
     returned_at = Column(DateTime)
     return_reason = Column(Text)
